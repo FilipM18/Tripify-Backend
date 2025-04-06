@@ -199,6 +199,26 @@ app.get('/trips', async (req, res) => {
     }
 });
 
+app.post('/trips', async (req, res) => {
+    try {
+        const { userId, startedAt, endedAt, distanceKm, durationSeconds, averagePace, route } = req.body;
+
+        const lineString = `LINESTRING(${route.map((p) => `${p.longitude} ${p.latitude}`).join(", ")})`;
+
+        const query = `
+            INSERT INTO trips (user_id, started_at, ended_at, distance_km, duration_seconds, average_pace, route_geometry)
+            VALUES ($1, $2, $3, $4, $5, $6, ST_GeomFromText($7, 4326))
+            RETURNING id;
+        `;
+
+        const result = await pool.query(query, [userId, startedAt, endedAt, distanceKm, durationSeconds, averagePace, lineString]);
+        res.json({ success: true, tripId: result.rows[0].id });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ success: false, error: 'Database error' });
+    }
+});
+
 app.listen(port, () => {
     console.log(`Server running on http://localhost:${port}`);
 });
