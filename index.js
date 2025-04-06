@@ -59,7 +59,7 @@ app.post('/auth/register', async (req, res) => {
             return res.status(409).json({ success: false, error: 'Pouzivatel uz existuje' });
         }
         console.error(error);
-        res.status(500).json({ success: false, error: 'Registracia zlihala' });
+        res.status(500).json({ success: false, error: 'Registracia zlyhala' });
     }
 });
 
@@ -77,10 +77,60 @@ app.post('/auth/login', async (req, res) => {
         res.json({ success: true , userId: user.id, email: user.email });
     } catch (error) {
         console.error(error);
-        res.status(500).json({ success: false, error: 'Prihlasenie zlihalo' });
+        res.status(500).json({ success: false, error: 'Prihlasenie zlyhalo' });
     }
 });
 
+app.get('/likes/:tripId', async (req, res) => {
+    try {
+        console.log(req.params);
+        const { tripId } = req.params;
+
+        const query = `
+                SELECT user_id
+                FROM likes WHERE trip_id = $1;
+            `;
+        const result = await pool.query(query, [tripId]);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'Vylet nebol najdeny' });
+        }
+        const likes = result.rows.map(row => row.user_id);
+        console.log(likes);
+        res.json({ success: true, likes });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ success: false, error: 'Chyba databazy' });
+    }
+});
+
+app.get('/comments/:tripId', async (req, res) => {    
+    try {
+        console.log(req.params);
+        const { tripId } = req.params;
+
+        const query = `
+                SELECT user_id, comment_text, created_at
+                FROM comments WHERE trip_id = $1 and parent_comment_id IS NOT NULL;
+            `;
+        const result = await pool.query(query, [tripId]);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'Vylet nebol najdeny' });
+        }
+
+        const comments = result.rows.map(row => ({
+            userId: row.user_id,
+            commentText: row.comment_text,
+            createdAt: row.created_at,
+        }));
+        console.log(comments);
+        res.json({ success: true, comments });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ success: false, error: 'Chyba databazy' });
+    }
+});
 
 app.listen(port, () => {
     console.log(`Server running on http://localhost:${port}`);
