@@ -132,6 +132,73 @@ app.get('/comments/:tripId', async (req, res) => {
     }
 });
 
+app.get('/trips/:tripId', async (req, res) => {
+    try {
+        console.log(req.params); // Debug
+        const { tripId } = req.params;
+
+        const query = `
+            SELECT t.id, u.username, t.ended_at, t.distance_km, t.duration_seconds, t.average_pace, t.info,
+                ST_AsGeoJSON(t.route_geometry) AS route,
+                COALESCE(json_agg(tp.photo_url) FILTER (WHERE tp.photo_url IS NOT NULL), '[]') AS photo_urls,
+                (SELECT COUNT(*) FROM likes WHERE trip_id = t.id) AS likes_count,
+                (SELECT COUNT(*) FROM comments WHERE trip_id = t.id) AS comments_count
+            FROM trips t 
+            JOIN users u ON t.user_id = u.id
+            LEFT JOIN trip_photos tp ON t.id = tp.trip_id
+            WHERE t.id = $1
+            GROUP BY t.id, u.username, t.ended_at, t.distance_km, t.duration_seconds, t.average_pace, t.info, t.route_geometry;
+        `;
+
+        const result = await pool.query(query, [tripId]);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'Vylet sa nenasiel' });
+        }
+
+        const trip = result.rows[0];
+        trip.route = JSON.parse(trip.route); // GeoJSON string -> object
+        console.log(trip.route); // Debug
+        res.json({ success: true, trip });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ success: false, error: 'Chyba databazy' });
+    }
+});
+
+app.get('/trips', async (req, res) => {
+    try {
+        const query = `
+            SELECT t.id, u.username, t.ended_at, t.distance_km, t.duration_seconds, t.average_pace, t.title,
+                ST_AsGeoJSON(t.route_geometry) AS route,
+                COALESCE(json_agg(tp.photo_url) FILTER (WHERE tp.photo_url IS NOT NULL), '[]') AS photo_urls,
+                (SELECT COUNT(*) FROM likes WHERE trip_id = t.id) AS likes_count,
+                (SELECT COUNT(*) FROM comments WHERE trip_id = t.id) AS comments_count
+            FROM trips t 
+            JOIN users u ON t.user_id = u.id
+            LEFT JOIN trip_photos tp ON t.id = tp.trip_id
+            GROUP BY t.id, u.username, t.ended_at, t.distance_km, t.duration_seconds, t.average_pace, t.title, t.route_geometry
+            LIMIT 5;
+        `;
+
+        const result = await pool.query(query);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'Vylet sa nanasiel' });
+        }
+
+        const trips = result.rows.map(trip => {
+            trip.route = JSON.parse(trip.route); // GeoJSON string -> object
+            return trip;
+        });
+
+        res.json({ success: true, trips });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ success: false, error: 'Chyba databazy' });
+    }
+});
+
 app.listen(port, () => {
     console.log(`Server running on http://localhost:${port}`);
 });
