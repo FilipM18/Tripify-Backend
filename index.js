@@ -4,6 +4,13 @@ import jwt from 'jsonwebtoken'; // Bude treba pridat
 import dotenv from 'dotenv';
 import pkg from '@supabase/pg';
 const { Pool } = pkg;
+import multer from 'multer';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import fs from 'fs';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 dotenv.config();
 const app = express();
@@ -18,6 +25,7 @@ const pool = new Pool({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static("public"));
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Debug !nezabudni vymazat
 app.use((req, res, next) => {
@@ -25,6 +33,23 @@ app.use((req, res, next) => {
     console.log('Content-Type:', req.get('Content-Type'));
     next();
 });
+
+
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, 'uploads/');
+    },
+    filename: (req, file, cb) => {
+        const uniqueName = `${Date.now()}-${file.originalname}`;
+        cb(null, uniqueName);
+    },
+});
+const upload = multer({ storage });
 
 app.post('/auth/register', async (req, res) => {
     try {
@@ -201,21 +226,21 @@ app.get('/trips', async (req, res) => {
 
 app.post('/trips', async (req, res) => {
     try {
-        const { userId, startedAt, endedAt, distanceKm, durationSeconds, averagePace, route } = req.body;
+        const { userId, startedAt, endedAt, distanceKm, durationSeconds, averagePace, route, title, info} = req.body;
 
         const lineString = `LINESTRING(${route.map((p) => `${p.longitude} ${p.latitude}`).join(", ")})`;
 
         const query = `
             INSERT INTO trips (user_id, started_at, ended_at, distance_km, duration_seconds, average_pace, route_geometry)
-            VALUES ($1, $2, $3, $4, $5, $6, ST_GeomFromText($7, 4326))
+            VALUES ($1, $2, $3, $4, $5, $6, ST_GeomFromText($7, 4326), $8, $9)
             RETURNING id;
         `;
 
-        const result = await pool.query(query, [userId, startedAt, endedAt, distanceKm, durationSeconds, averagePace, lineString]);
+        const result = await pool.query(query, [userId, startedAt, endedAt, distanceKm, durationSeconds, averagePace, lineString, title, info]);
         res.json({ success: true, tripId: result.rows[0].id });
     } catch (error) {
         console.error(error);
-        res.status(500).json({ success: false, error: 'Database error' });
+        res.status(500).json({ success: false, error: 'Chyba databazy' });
     }
 });
 
@@ -224,7 +249,7 @@ app.put('/auth/profile', async (req, res) => {
         const { userId, username, email, phoneNumber, photoUrl } = req.body;
 
         if (!userId) {
-            return res.status(400).json({ success: false, error: 'User ID is required.' });
+            return res.status(400).json({ success: false, error: 'Vyžaduje sa ID používateľa.' });
         }
 
         const updates = [];
@@ -249,7 +274,7 @@ app.put('/auth/profile', async (req, res) => {
         }
 
         if (updates.length === 0) {
-            return res.status(400).json({ success: false, error: 'No fields to update.' });
+            return res.status(400).json({ success: false, error: 'Žiadne polia na aktualizáciu.' });
         }
 
         query += updates.join(', ') + ' WHERE id = $1 RETURNING id, username, email, tel_num, photo_url;';
@@ -257,27 +282,27 @@ app.put('/auth/profile', async (req, res) => {
         const result = await pool.query(query, values);
 
         if (result.rowCount === 0) {
-            return res.status(404).json({ success: false, error: 'User not found.' });
+            return res.status(404).json({ success: false, error: 'Používateľ sa nenašiel' });
         }
 
         res.json({ success: true, user: result.rows[0] });
     } catch (error) {
         console.error(error);
-        res.status(500).json({ success: false, error: 'Profile update failed.' });
+        res.status(500).json({ success: false, error: 'Aktualizácia profilu zlyhala.' });
     }
 });
 
-pp.put('/auth/password', async (req, res) => {
+app.put('/auth/password', async (req, res) => {
     try {
         const { userId, currentPassword, newPassword } = req.body;
 
         if (!userId || !currentPassword || !newPassword) {
-            return res.status(400).json({ success: false, error: 'User ID, current password, and new password are required.' });
+            return res.status(400).json({ success: false, error: 'Vyžaduje sa ID používateľa, aktuálne heslo a nové heslo.' });
         }
 
         const userQuery = await pool.query('SELECT password FROM users WHERE id = $1', [userId]);
         if (userQuery.rowCount === 0) {
-            return res.status(404).json({ success: false, error: 'User not found.' });
+            return res.status(404).json({ success: false, error: 'Používateľ sa nenašiel.' });
         }
 
         const user = userQuery.rows[0];
@@ -285,7 +310,7 @@ pp.put('/auth/password', async (req, res) => {
         const validPassword = await bcrypt.compare(currentPassword, user.password);
         console.log(currentPassword, user.password, validPassword); // Debug
         if (!validPassword) {
-            return res.status(401).json({ success: false, error: 'Current password is incorrect.' });
+            return res.status(401).json({ success: false, error: 'Aktuálne heslo je nesprávne.' });
         }
 
         const hashedNewPassword = await bcrypt.hash(newPassword, 12);
@@ -295,10 +320,74 @@ pp.put('/auth/password', async (req, res) => {
         `;
         const result = await pool.query(updateQuery, [hashedNewPassword, userId]);
 
-        res.json({ success: true, message: 'Password updated successfully.' });
+        res.json({ success: true, message: 'Heslo bolo úspešne aktualizované.' });
     } catch (error) {
         console.error(error);
-        res.status(500).json({ success: false, error: 'Password update failed.' });
+        res.status(500).json({ success: false, error: 'Aktualizácia hesla zlyhala.' });
+    }
+});
+
+app.get('/trips/:tripId/photos', async (req, res) => {
+    try {
+        const { tripId } = req.params;
+
+        const query = `
+            SELECT id, trip_id, user_id, photo_url, latitude, longitude, description, created_at
+            FROM trip_photos WHERE trip_id = $1
+            ORDER BY created_at;
+        `;
+
+        const result = await pool.query(query, [tripId]);
+        const photos = result.rows;
+        
+        res.json({ success: true, photos });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ success: false, error: 'Chyba databazy' });
+    }
+});
+
+app.post('/trips/:tripId/photos', upload.single('photo'), async (req, res) => {
+    try {
+        const { tripId } = req.params;
+        const { userId, latitude, longitude, description } = req.body;
+
+        if (!req.file) {
+            return res.status(400).json({ success: false, error: 'Nebola nahraná žiadna fotografia' });
+        }
+
+        const photoUrl = `/uploads/${req.file.filename}`;
+
+        const query = `
+            INSERT INTO trip_photos (trip_id, user_id, photo_url, latitude, longitude, description, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, NOW())
+            RETURNING id;
+        `;
+        
+        const result = await pool.query(query, [
+            tripId, 
+            userId, 
+            photoUrl, 
+            parseFloat(latitude), 
+            parseFloat(longitude), 
+            description || null
+        ]);
+
+        res.json({ 
+            success: true, 
+            photo: {
+                id: result.rows[0].id,
+                trip_id: tripId,
+                user_id: userId,
+                photo_url: photoUrl,
+                latitude: parseFloat(latitude),
+                longitude: parseFloat(longitude),
+                description: description || null
+            }
+        });
+    } catch (error) {
+        console.error('Chyba pri nahrávaní fotky:', error);
+        res.status(500).json({ success: false, error: 'Chyba databazy' });
     }
 });
 
