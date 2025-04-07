@@ -219,6 +219,89 @@ app.post('/trips', async (req, res) => {
     }
 });
 
+app.put('/auth/profile', async (req, res) => {
+    try {
+        const { userId, username, email, phoneNumber, photoUrl } = req.body;
+
+        if (!userId) {
+            return res.status(400).json({ success: false, error: 'User ID is required.' });
+        }
+
+        const updates = [];
+        const values = [userId];
+        let query = 'UPDATE users SET ';
+
+        if (username) {
+            updates.push('username = $' + (values.length + 1));
+            values.push(username);
+        }
+        if (email) {
+            updates.push('email = $' + (values.length + 1));
+            values.push(email);
+        }
+        if (phoneNumber !== undefined) {
+            updates.push('tel_num = $' + (values.length + 1));
+            values.push(phoneNumber === '' ? null : phoneNumber);
+        }
+        if (photoUrl !== undefined) {
+            updates.push('photo_url = $' + (values.length + 1));
+            values.push(photoUrl === '' ? null : photoUrl);
+        }
+
+        if (updates.length === 0) {
+            return res.status(400).json({ success: false, error: 'No fields to update.' });
+        }
+
+        query += updates.join(', ') + ' WHERE id = $1 RETURNING id, username, email, tel_num, photo_url;';
+
+        const result = await pool.query(query, values);
+
+        if (result.rowCount === 0) {
+            return res.status(404).json({ success: false, error: 'User not found.' });
+        }
+
+        res.json({ success: true, user: result.rows[0] });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ success: false, error: 'Profile update failed.' });
+    }
+});
+
+pp.put('/auth/password', async (req, res) => {
+    try {
+        const { userId, currentPassword, newPassword } = req.body;
+
+        if (!userId || !currentPassword || !newPassword) {
+            return res.status(400).json({ success: false, error: 'User ID, current password, and new password are required.' });
+        }
+
+        const userQuery = await pool.query('SELECT password FROM users WHERE id = $1', [userId]);
+        if (userQuery.rowCount === 0) {
+            return res.status(404).json({ success: false, error: 'User not found.' });
+        }
+
+        const user = userQuery.rows[0];
+
+        const validPassword = await bcrypt.compare(currentPassword, user.password);
+        console.log(currentPassword, user.password, validPassword); // Debug
+        if (!validPassword) {
+            return res.status(401).json({ success: false, error: 'Current password is incorrect.' });
+        }
+
+        const hashedNewPassword = await bcrypt.hash(newPassword, 12);
+
+        const updateQuery = `
+            UPDATE users SET password = $1 WHERE id = $2 RETURNING id;
+        `;
+        const result = await pool.query(updateQuery, [hashedNewPassword, userId]);
+
+        res.json({ success: true, message: 'Password updated successfully.' });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ success: false, error: 'Password update failed.' });
+    }
+});
+
 app.listen(port, () => {
     console.log(`Server running on http://localhost:${port}`);
 });
