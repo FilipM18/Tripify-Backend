@@ -51,9 +51,9 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-app.post('/auth/register', async (req, res) => {
+app.post('/auth/register', upload.single('photo'), async (req, res) => {
     try {
-        const { username, email, password, phoneNumber, photoUrl } = req.body;
+        const { username, email, password, phoneNumber} = req.body;
 
         if (!username || !email || !password) {
             return res.status(400).json({ success: false, error: 'Username, email, a heslo su povinne.' });
@@ -66,7 +66,7 @@ app.post('/auth/register', async (req, res) => {
         }
 
         const sanitizedPhoneNumber = phoneNumber === '' ? null : phoneNumber;
-        const sanitizedPhotoUrl = photoUrl === '' ? null : photoUrl;
+        const photoUrl = req.file ? `/uploads/${req.file.filename}` : null;
 
         const hashedPassword = await bcrypt.hash(password, 12);
 
@@ -75,7 +75,7 @@ app.post('/auth/register', async (req, res) => {
             VALUES ($1, $2, $3, $4, $5)
             RETURNING id, username, email;
         `;
-        const result = await pool.query(query, [username, email, hashedPassword, sanitizedPhoneNumber, sanitizedPhotoUrl]);
+        const result = await pool.query(query, [username, email, hashedPassword, sanitizedPhoneNumber, photoUrl]);
 
         const newUser = result.rows[0];
         res.json({ success: true, user: newUser });
@@ -224,19 +224,50 @@ app.get('/trips', async (req, res) => {
     }
 });
 
+app.get('/dailyTrips/:userId/:day', async (req, res) => {
+    try {
+        console.log(req.params); // Debug
+        const { userId, day } = req.params;
+
+        const query = `
+            SELECT id, distance_km, duration_seconds, average_pace, type
+            FROM trips 
+            WHERE user_id = $1 
+            AND started_at >= $2::date
+            AND started_at < ($2::date + INTERVAL '1 day')
+            ORDER BY started_at;
+        `;
+
+        const result = await pool.query(query, [userId, day]);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'Ziaden vylet v dany den' });
+        }
+
+        const trips = result.rows.map(trip => {
+            return trip;
+        });
+
+        res.json({ success: true, trips });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ success: false, error: 'Eror v databaze' });
+    }
+});
+
 app.post('/trips', async (req, res) => {
     try {
-        const { userId, startedAt, endedAt, distanceKm, durationSeconds, averagePace, route, title, info} = req.body;
+        const { userId, startedAt, endedAt, distanceKm, durationSeconds, averagePace, route, title, info, type} = req.body;
 
         const lineString = `LINESTRING(${route.map((p) => `${p.longitude} ${p.latitude}`).join(", ")})`;
 
         const query = `
-            INSERT INTO trips (user_id, started_at, ended_at, distance_km, duration_seconds, average_pace, route_geometry)
-            VALUES ($1, $2, $3, $4, $5, $6, ST_GeomFromText($7, 4326), $8, $9)
+            INSERT INTO trips (user_id, started_at, ended_at, distance_km, duration_seconds, average_pace, route_geometry, title, info, type)
+            VALUES ($1, $2, $3, $4, $5, $6, ST_GeomFromText($7, 4326), $8, $9, $10)
             RETURNING id;
         `;
 
-        const result = await pool.query(query, [userId, startedAt, endedAt, distanceKm, durationSeconds, averagePace, lineString, title, info]);
+        const result = await pool.query(query, [userId, startedAt, endedAt, distanceKm, durationSeconds, averagePace, lineString, title, info, type]);
         res.json({ success: true, tripId: result.rows[0].id });
     } catch (error) {
         console.error(error);
