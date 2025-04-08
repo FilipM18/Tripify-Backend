@@ -27,14 +27,6 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.static("public"));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// Debug !nezabudni vymazat
-app.use((req, res, next) => {
-    console.log('Req body:', req.body);
-    console.log('Content-Type:', req.get('Content-Type'));
-    next();
-});
-
-
 const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir, { recursive: true });
@@ -421,6 +413,51 @@ app.post('/trips/:tripId/photos', upload.single('photo'), async (req, res) => {
         res.status(500).json({ success: false, error: 'Chyba databazy' });
     }
 });
+
+app.delete('/trips/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        const tripQuery = "SELECT * FROM trips WHERE id = $1";
+        const tripResult = await pool.query(tripQuery, [id]);
+        
+        if (tripResult.rows.length === 0) {
+            return res.status(404).json({ 
+                success: false, 
+                error: 'Výlet nebol nájdený.' 
+            });
+        }
+        
+        await pool.query('BEGIN');
+        
+        const deleteCommentsQuery = "DELETE FROM comments WHERE trip_id = $1";
+        await pool.query(deleteCommentsQuery, [id]);
+        
+        const deleteLikesQuery = "DELETE FROM likes WHERE trip_id = $1";
+        await pool.query(deleteLikesQuery, [id]);
+        
+        const deletePhotosQuery = "DELETE FROM trip_photos WHERE trip_id = $1";
+        await pool.query(deletePhotosQuery, [id]);
+        
+        const deleteTripQuery = "DELETE FROM trips WHERE id = $1";
+        await pool.query(deleteTripQuery, [id]);
+        
+        await pool.query('COMMIT');
+        
+        return res.status(200).json({ 
+            success: true, 
+            message: 'Výlet a všetky súvisiace údaje boli úspešne odstránené.' 
+        });
+    } catch (error) {
+        await pool.query('ROLLBACK');
+        console.error(error);
+        return res.status(500).json({ 
+            success: false, 
+            error: 'Chyba servera pri odstraňovaní cesty.' 
+        });
+    }
+});
+
 
 app.listen(port, () => {
     console.log(`Server running on http://localhost:${port}`);
