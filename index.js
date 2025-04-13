@@ -38,15 +38,16 @@ const storage = multer.diskStorage({
     },
     filename: (req, file, cb) => {
         const uniqueName = `${Date.now()}-${file.originalname}`;
-        cb(null, uniqueName);
+        cb(null, true ? uniqueName : file.originalname);
     },
 });
 const upload = multer({ storage });
 
-app.post('/auth/register', upload.single('photo'), async (req, res) => {
+app.post('/auth/register', upload.single('pfp'), async (req, res) => {
     try {
         const { username, email, password, phoneNumber} = req.body;
-
+        console.log(req.body);
+        console.log(req.file); // Debug
         if (!username || !email || !password) {
             return res.status(400).json({ success: false, error: 'Username, email, a heslo su povinne.' });
         }
@@ -98,19 +99,26 @@ app.post('/auth/login', async (req, res) => {
     }
 });
 
-app.get('/likes/:tripId', async (req, res) => {
-    try {
-        console.log(req.params);
-        const { tripId } = req.params;
+app.get('/likes/:type/:id', async (req, res) => {
+    try { 
+        const { type, id } = req.params;
+        let query = '';
+        
+        if (type === 'trip') {
+        query = 'SELECT user_id FROM likes WHERE trip_id = $1';
+        } else if (type === 'comment') {
+        query = 'SELECT user_id FROM likes WHERE comment_id = $1';
+        }
+        const result = await pool.query(query, [id]);
 
-        const query = `
-                SELECT user_id
-                FROM likes WHERE trip_id = $1;
-            `;
-        const result = await pool.query(query, [tripId]);
-
-        if (result.rows.length === 0) {
+        if (result.rows.length === 0 && type === 'trip') {
             return res.status(404).json({ success: false, error: 'Vylet nebol najdeny' });
+        }
+        if (result.rows.length === 0 && type === 'comment') {
+            return res.status(404).json({ success: false, error: 'Komentar nebol najdeny' });
+        }
+        if (result.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'Neexistujuci typ' });
         }
         const likes = result.rows.map(row => row.user_id);
         console.log(likes);
