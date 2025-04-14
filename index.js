@@ -1,6 +1,6 @@
 import express from 'express';
 import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken'; // Bude treba pridat
+import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 import pkg from '@supabase/pg';
 const { Pool } = pkg;
@@ -16,6 +16,9 @@ dotenv.config();
 const app = express();
 const port = 3000;
 
+
+const JWT_SECRET = process.env.JWT_SECRET
+
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: { rejectUnauthorized: false }
@@ -26,6 +29,24 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static("public"));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+  
+  if (!token) {
+    return res.status(401).json({ success: false, error: 'Pristup zamietnuty. Token nebol nenajdeny.' });
+  }
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      return res.status(403).json({ success: false, error: 'Token je neplatny.' });
+    }
+    req.user = user;
+    next();
+  });
+};
 
 const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
@@ -71,9 +92,16 @@ app.post('/auth/register', upload.single('pfp'), async (req, res) => {
         const result = await pool.query(query, [username, email, hashedPassword, sanitizedPhoneNumber, photoUrl]);
 
         const newUser = result.rows[0];
-        res.json({ success: true, user: newUser });
+        
+        const token = jwt.sign(
+            { id: newUser.id, email: newUser.email, username: newUser.username },
+            JWT_SECRET,
+            { expiresIn: '24h' }
+        );
+        
+        res.json({ success: true, user: newUser, token });
     } catch (error) {
-        if (error.code === '23505') { // Unique constraint violation
+        if (error.code === '23505') { 
             return res.status(409).json({ success: false, error: 'Pouzivatel uz existuje' });
         }
         console.error(error);
@@ -85,21 +113,32 @@ app.post('/auth/login', async (req, res) => {
     try {
         const { email, password } = req.body;
 
-        const userQuery = await pool.query('SELECT id, email, password FROM users WHERE email = $1', [email]);
+        const userQuery = await pool.query('SELECT id, email, password, username FROM users WHERE email = $1', [email]);
         if (userQuery.rowCount === 0) return res.status(401).json({ success: false, error: 'Invalidne udaje' });
 
         const user = userQuery.rows[0];
         const validPassword = await bcrypt.compare(password, user.password);
         if (!validPassword) return res.status(401).json({ success: false, error: 'Invalidne udaje' });
 
-        res.json({ success: true , userId: user.id, email: user.email });
+        const token = jwt.sign(
+            { id: user.id, email: user.email, username: user.username },
+            JWT_SECRET,
+            { expiresIn: '24h' }
+        );
+
+        res.json({ 
+            success: true, 
+            userId: user.id, 
+            email: user.email,
+            token 
+        });
     } catch (error) {
         console.error(error);
         res.status(500).json({ success: false, error: 'Prihlasenie zlyhalo' });
     }
 });
 
-app.get('/likes/:type/:id', async (req, res) => {
+app.get('/likes/:type/:id', authenticateToken, async (req, res) => {
     try { 
         const { type, id } = req.params;
         let query = '';
@@ -129,7 +168,7 @@ app.get('/likes/:type/:id', async (req, res) => {
     }
 });
 
-app.get('/comments/:tripId', async (req, res) => {    
+app.get('/comments/:tripId', authenticateToken, async (req, res) => {    
     try {
         console.log(req.params);
         const { tripId } = req.params;
@@ -157,7 +196,7 @@ app.get('/comments/:tripId', async (req, res) => {
     }
 });
 
-app.get('/trips/:tripId', async (req, res) => {
+app.get('/trips/:tripId', authenticateToken, async (req, res) => {
     try {
         console.log(req.params); // Debug
         const { tripId } = req.params;
@@ -191,7 +230,7 @@ app.get('/trips/:tripId', async (req, res) => {
     }
 });
 
-app.get('/trips', async (req, res) => {
+app.get('/trips', authenticateToken, async (req, res) => {
     try {
         const query = `
             SELECT t.id, u.username, t.ended_at, t.distance_km, t.duration_seconds, t.average_pace, t.title,
@@ -224,7 +263,7 @@ app.get('/trips', async (req, res) => {
     }
 });
 
-app.get('/dailyTrips/:userId/:day', async (req, res) => {
+app.get('/dailyTrips/:userId/:day', authenticateToken, async (req, res) => {
     try {
         console.log(req.params); // Debug
         const { userId, day } = req.params;
@@ -255,7 +294,7 @@ app.get('/dailyTrips/:userId/:day', async (req, res) => {
     }
 });
 
-app.post('/trips', async (req, res) => {
+app.post('/trips', authenticateToken, async (req, res) => {
     try {
         const { userId, startedAt, endedAt, distanceKm, durationSeconds, averagePace, route, title, info, type} = req.body;
 
@@ -275,7 +314,7 @@ app.post('/trips', async (req, res) => {
     }
 });
 
-app.put('/auth/profile', async (req, res) => {
+app.put('/auth/profile', authenticateToken, async (req, res) => {
     try {
         const { userId, username, email, phoneNumber, photoUrl } = req.body;
 
@@ -323,7 +362,7 @@ app.put('/auth/profile', async (req, res) => {
     }
 });
 
-app.put('/auth/password', async (req, res) => {
+app.put('/auth/password', authenticateToken, async (req, res) => {
     try {
         const { userId, currentPassword, newPassword } = req.body;
 
@@ -358,7 +397,7 @@ app.put('/auth/password', async (req, res) => {
     }
 });
 
-app.get('/trips/:tripId/photos', async (req, res) => {
+app.get('/trips/:tripId/photos', authenticateToken, async (req, res) => {
     try {
         const { tripId } = req.params;
 
@@ -378,7 +417,7 @@ app.get('/trips/:tripId/photos', async (req, res) => {
     }
 });
 
-app.post('/trips/:tripId/photos', upload.single('photo'), async (req, res) => {
+app.post('/trips/:tripId/photos', authenticateToken, upload.single('photo'), async (req, res) => {
     try {
         const { tripId } = req.params;
         const { userId, latitude, longitude, description } = req.body;
@@ -422,7 +461,7 @@ app.post('/trips/:tripId/photos', upload.single('photo'), async (req, res) => {
     }
 });
 
-app.delete('/trips/:id', async (req, res) => {
+app.delete('/trips/:id', authenticateToken, async (req, res) => {
     try {
         const { id } = req.params;
         
@@ -466,6 +505,17 @@ app.delete('/trips/:id', async (req, res) => {
     }
 });
 
+app.get('/auth/verify', authenticateToken, (req, res) => {
+  res.json({ 
+    success: true, 
+    message: 'Token je platny', 
+    user: {
+      id: req.user.id,
+      email: req.user.email,
+      username: req.user.username
+    } 
+  });
+});
 
 app.listen(port, () => {
     console.log(`Server running on http://localhost:${port}`);
