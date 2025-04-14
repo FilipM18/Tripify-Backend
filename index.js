@@ -112,7 +112,9 @@ app.post('/auth/register', upload.single('pfp'), async (req, res) => {
 app.post('/auth/login', async (req, res) => {
     try {
         const { email, password } = req.body;
-
+        if (!email || !password) {
+            return res.status(400).json({ success: false, error: 'Email a heslo su povinne.' });
+        }
         const userQuery = await pool.query('SELECT id, email, password, username FROM users WHERE email = $1', [email]);
         if (userQuery.rowCount === 0) return res.status(401).json({ success: false, error: 'Invalidne udaje' });
 
@@ -141,6 +143,9 @@ app.post('/auth/login', async (req, res) => {
 app.get('/likes/:type/:id', authenticateToken, async (req, res) => {
     try { 
         const { type, id } = req.params;
+        if (isNaN(id)) {
+            return res.status(400).json({ success: false, error: 'ID musí byť číslo.' });
+        }
         let query = '';
         
         if (type === 'trip') {
@@ -172,7 +177,9 @@ app.get('/comments/:tripId', authenticateToken, async (req, res) => {
     try {
         console.log(req.params);
         const { tripId } = req.params;
-
+        if (!tripId || isNaN(tripId)) {
+            return res.status(400).json({ success: false, error: 'ID výletu musí byť číslo.' });
+        }
         const query = `
                 SELECT user_id, comment_text, created_at
                 FROM comments WHERE trip_id = $1 and parent_comment_id IS NOT NULL;
@@ -200,16 +207,20 @@ app.get('/trips/:tripId', authenticateToken, async (req, res) => {
     try {
         console.log(req.params); // Debug
         const { tripId } = req.params;
-
+        if (!tripId || isNaN(tripId)) {
+            return res.status(400).json({ success: false, error: 'ID výletu musí byť číslo.' });
+        }
         const query = `
             SELECT t.id, u.username, t.ended_at, t.distance_km, t.duration_seconds, t.average_pace, t.info,
                 ST_AsGeoJSON(t.route_geometry) AS route,
                 COALESCE(json_agg(tp.photo_url) FILTER (WHERE tp.photo_url IS NOT NULL), '[]') AS photo_urls,
                 (SELECT COUNT(*) FROM likes WHERE trip_id = t.id) AS likes_count,
-                (SELECT COUNT(*) FROM comments WHERE trip_id = t.id) AS comments_count
+                (SELECT COUNT(*) FROM comments WHERE trip_id = t.id) AS comments_count,
+                COALESCE(json_agg(c.comment_text) FILTER (WHERE c.trip_id = t.id), '[]') AS comments
             FROM trips t 
             JOIN users u ON t.user_id = u.id
             LEFT JOIN trip_photos tp ON t.id = tp.trip_id
+            LEFT JOIN comments c ON c.trip_id = t.id
             WHERE t.id = $1
             GROUP BY t.id, u.username, t.ended_at, t.distance_km, t.duration_seconds, t.average_pace, t.info, t.route_geometry;
         `;
@@ -244,9 +255,7 @@ app.get('/trips', authenticateToken, async (req, res) => {
             GROUP BY t.id, u.username, t.ended_at, t.distance_km, t.duration_seconds, t.average_pace, t.title, t.route_geometry
             LIMIT 5;
         `;
-
         const result = await pool.query(query);
-
         if (result.rows.length === 0) {
             return res.status(404).json({ success: false, error: 'Vylet sa nanasiel' });
         }
@@ -267,7 +276,12 @@ app.get('/dailyTrips/:userId/:day', authenticateToken, async (req, res) => {
     try {
         console.log(req.params); // Debug
         const { userId, day } = req.params;
-
+        if (isNaN(userId)) {
+            return res.status(400).json({ success: false, error: 'ID používateľa musí byť číslo.' });
+        }
+        if (isNaN(Date.parse(day))) {
+            return res.status(400).json({ success: false, error: 'Dátum je neplatný.' });
+        }
         const query = `
             SELECT id, distance_km, duration_seconds, average_pace, type
             FROM trips 
@@ -282,7 +296,6 @@ app.get('/dailyTrips/:userId/:day', authenticateToken, async (req, res) => {
         if (result.rows.length === 0) {
             return res.status(404).json({ success: false, error: 'Ziaden vylet v dany den' });
         }
-
         const trips = result.rows.map(trip => {
             return trip;
         });
@@ -299,13 +312,17 @@ app.post('/trips', authenticateToken, async (req, res) => {
         const { userId, startedAt, endedAt, distanceKm, durationSeconds, averagePace, route, title, info, type} = req.body;
 
         const lineString = `LINESTRING(${route.map((p) => `${p.longitude} ${p.latitude}`).join(", ")})`;
-
+        if (!userId || !startedAt || !endedAt || !distanceKm || !durationSeconds || !averagePace || !route || !type) {
+            return res.status(400).json({ success: false, error: 'Vsetky udaje su povinne.' });
+        }
         const query = `
             INSERT INTO trips (user_id, started_at, ended_at, distance_km, duration_seconds, average_pace, route_geometry, title, info, type)
             VALUES ($1, $2, $3, $4, $5, $6, ST_GeomFromText($7, 4326), $8, $9, $10)
             RETURNING id;
         `;
-
+        if (!lineString) {
+            return res.status(400).json({ success: false, error: 'Chyba pri spracovaní trasy' });
+        }
         const result = await pool.query(query, [userId, startedAt, endedAt, distanceKm, durationSeconds, averagePace, lineString, title, info, type]);
         res.json({ success: true, tripId: result.rows[0].id });
     } catch (error) {
@@ -314,10 +331,10 @@ app.post('/trips', authenticateToken, async (req, res) => {
     }
 });
 
-app.put('/auth/profile', authenticateToken, async (req, res) => {
+app.put('/auth/profile', authenticateToken, upload.single('pfp') ,async (req, res) => {
     try {
-        const { userId, username, email, phoneNumber, photoUrl } = req.body;
-
+        const { userId, username, email, phoneNumber } = req.body;
+        const photoUrl = `/uploads/${req.file.filename}`;
         if (!userId) {
             return res.status(400).json({ success: false, error: 'Vyžaduje sa ID používateľa.' });
         }
@@ -346,7 +363,6 @@ app.put('/auth/profile', authenticateToken, async (req, res) => {
         if (updates.length === 0) {
             return res.status(400).json({ success: false, error: 'Žiadne polia na aktualizáciu.' });
         }
-
         query += updates.join(', ') + ' WHERE id = $1 RETURNING id, username, email, tel_num, photo_url;';
 
         const result = await pool.query(query, values);
@@ -354,7 +370,6 @@ app.put('/auth/profile', authenticateToken, async (req, res) => {
         if (result.rowCount === 0) {
             return res.status(404).json({ success: false, error: 'Používateľ sa nenašiel' });
         }
-
         res.json({ success: true, user: result.rows[0] });
     } catch (error) {
         console.error(error);
@@ -369,7 +384,12 @@ app.put('/auth/password', authenticateToken, async (req, res) => {
         if (!userId || !currentPassword || !newPassword) {
             return res.status(400).json({ success: false, error: 'Vyžaduje sa ID používateľa, aktuálne heslo a nové heslo.' });
         }
-
+        if (newPassword.length < 8) {
+            return res.status(400).json({ success: false, error: 'Heslo musí mať aspoň 8 znakov.' });
+        }
+        if (currentPassword === newPassword) {
+            return res.status(400).json({ success: false, error: 'Nové heslo sa nesmie zhodovať s aktuálnym heslom.' });
+        }
         const userQuery = await pool.query('SELECT password FROM users WHERE id = $1', [userId]);
         if (userQuery.rowCount === 0) {
             return res.status(404).json({ success: false, error: 'Používateľ sa nenašiel.' });
@@ -409,7 +429,9 @@ app.get('/trips/:tripId/photos', authenticateToken, async (req, res) => {
 
         const result = await pool.query(query, [tripId]);
         const photos = result.rows;
-        
+        if (photos.length === 0) {
+            return res.status(404).json({ success: false, error: 'Fotografie neboli nájdené' });
+        }
         res.json({ success: true, photos });
     } catch (error) {
         console.error(error);
@@ -424,6 +446,19 @@ app.post('/trips/:tripId/photos', authenticateToken, upload.single('photo'), asy
 
         if (!req.file) {
             return res.status(400).json({ success: false, error: 'Nebola nahraná žiadna fotografia' });
+        }
+
+        if (!tripId || !userId) {
+            return res.status(400).json({ success: false, error: 'Vyžaduje sa ID výletu a ID používateľa.' });
+        }
+        if (!latitude || !longitude) {
+            return res.status(400).json({ success: false, error: 'Vyžaduje sa zemepisná šírka a dĺžka.' });
+        }
+        if (isNaN(latitude) || isNaN(longitude)) {
+            return res.status(400).json({ success: false, error: 'Zemepisná šírka a dĺžka musia byť čísla.' });
+        }
+        if (description && description.length > 255) {
+            return res.status(400).json({ success: false, error: 'Popis je príliš dlhý.' });
         }
 
         const photoUrl = `/uploads/${req.file.filename}`;
@@ -464,7 +499,7 @@ app.post('/trips/:tripId/photos', authenticateToken, upload.single('photo'), asy
 app.delete('/trips/:id', authenticateToken, async (req, res) => {
     try {
         const { id } = req.params;
-        
+
         const tripQuery = "SELECT * FROM trips WHERE id = $1";
         const tripResult = await pool.query(tripQuery, [id]);
         
@@ -474,7 +509,12 @@ app.delete('/trips/:id', authenticateToken, async (req, res) => {
                 error: 'Výlet nebol nájdený.' 
             });
         }
-        
+        if (tripResult.rows[0].user_id !== req.user.id) {
+            return res.status(403).json({ 
+                success: false, 
+                error: 'Nemáte oprávnenie na odstránenie tohto výletu.' 
+            });
+        }
         await pool.query('BEGIN');
         
         const deleteCommentsQuery = "DELETE FROM comments WHERE trip_id = $1";
