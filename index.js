@@ -182,10 +182,10 @@ app.get('/comments/:tripId', authenticateToken, async (req, res) => {
         }
         const query = `
                 SELECT user_id, comment_text, created_at
-                FROM comments WHERE trip_id = $1 and parent_comment_id IS NOT NULL;
+                FROM comments WHERE trip_id = $1 and parent_comment_id IS NULL;
             `;
         const result = await pool.query(query, [tripId]);
-
+        //console.log(result.rows); // Debug
         if (result.rows.length === 0) {
             return res.status(404).json({ success: false, error: 'Vylet nebol najdeny' });
         }
@@ -276,9 +276,6 @@ app.get('/dailyTrips/:userId/:day', authenticateToken, async (req, res) => {
     try {
         console.log(req.params); // Debug
         const { userId, day } = req.params;
-        if (isNaN(userId)) {
-            return res.status(400).json({ success: false, error: 'ID používateľa musí byť číslo.' });
-        }
         if (isNaN(Date.parse(day))) {
             return res.status(400).json({ success: false, error: 'Dátum je neplatný.' });
         }
@@ -334,7 +331,7 @@ app.post('/trips', authenticateToken, async (req, res) => {
 app.put('/auth/profile', authenticateToken, upload.single('pfp') ,async (req, res) => {
     try {
         const { userId, username, email, phoneNumber } = req.body;
-        const photoUrl = `/uploads/${req.file.filename}`;
+        const photoUrl = req.file ? `/uploads/${req.file.filename}` : null;
         if (!userId) {
             return res.status(400).json({ success: false, error: 'Vyžaduje sa ID používateľa.' });
         }
@@ -509,6 +506,7 @@ app.delete('/trips/:id', authenticateToken, async (req, res) => {
                 error: 'Výlet nebol nájdený.' 
             });
         }
+        //console.log(tripResult.rows[0].user_id, req.user.id); // Debug
         if (tripResult.rows[0].user_id !== req.user.id) {
             return res.status(403).json({ 
                 success: false, 
