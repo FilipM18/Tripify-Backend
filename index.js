@@ -155,18 +155,58 @@ app.get('/likes/:type/:id', authenticateToken, async (req, res) => {
         }
         const result = await pool.query(query, [id]);
 
-        if (result.rows.length === 0 && type === 'trip') {
-            return res.status(404).json({ success: false, error: 'Vylet nebol najdeny' });
-        }
-        if (result.rows.length === 0 && type === 'comment') {
-            return res.status(404).json({ success: false, error: 'Komentar nebol najdeny' });
-        }
-        if (result.rows.length === 0) {
-            return res.status(404).json({ success: false, error: 'Neexistujuci typ' });
-        }
         const likes = result.rows.map(row => row.user_id);
         console.log(likes);
         res.json({ success: true, likes });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ success: false, error: 'Chyba databazy' });
+    }
+});
+
+app.post('/likes/:type/:id', authenticateToken, async (req, res) => {
+    try {
+        const { type, id } = req.params;
+        if (isNaN(id)) {
+            return res.status(400).json({ success: false, error: 'ID musí byť číslo.' });
+        }
+        let checkQuery = '';
+        if (type === 'trip') {
+            checkQuery = 'SELECT * FROM likes WHERE user_id = $1 AND trip_id = $2';
+        } else if (type === 'comment') {
+            checkQuery = 'SELECT * FROM likes WHERE user_id = $1 AND comment_id = $2';
+        } else {
+            return res.status(400).json({ success: false, error: 'Neplatny typ.' });
+        }let query = '';
+        const checkResult = await pool.query(checkQuery, [req.user.id, id]);
+        console.log(checkResult.rows); // Debug
+        if (checkResult.rows.length > 0) {
+            let deleteQuery = '';
+            if (type === 'trip') {
+                deleteQuery = 'DELETE FROM likes WHERE user_id = $1 AND trip_id = $2 RETURNING *';
+            } else if (type === 'comment') {
+                deleteQuery = 'DELETE FROM likes WHERE user_id = $1 AND comment_id = $2 RETURNING *';
+            }
+            const deleteResult = await pool.query(deleteQuery, [req.user.id, id]);
+            console.log("vymazaný like",deleteResult.rows); // Debug
+        }
+        else {
+            
+            if (type === 'trip') {
+                query = 'INSERT INTO likes (user_id, trip_id) VALUES ($1, $2) RETURNING *';
+            } else if (type === 'comment') {
+                query = 'INSERT INTO likes (user_id, comment_id) VALUES ($1, $2) RETURNING *';
+            } else {
+                return res.status(400).json({ success: false, error: 'Neplatny typ.' });
+            }
+        
+            
+        }const result = await pool.query(query, [req.user.id, id]);
+        if (result.rowCount === 0) {
+            return res.status(404).json({ success: false, error: 'Vylet nebol najdeny' });
+        }
+        
+        res.json({ success: true, like: result.rows[0] });
     } catch (error) {
         console.error(error);
         res.status(500).json({ success: false, error: 'Chyba databazy' });
@@ -181,22 +221,53 @@ app.get('/comments/:tripId', authenticateToken, async (req, res) => {
             return res.status(400).json({ success: false, error: 'ID výletu musí byť číslo.' });
         }
         const query = `
-                SELECT user_id, comment_text, created_at
-                FROM comments WHERE trip_id = $1 and parent_comment_id IS NULL;
+                SELECT c.user_id, c.comment_text, c.created_at, u.username, u.photo_url 
+                FROM comments c 
+                JOIN users u ON c.user_id = u.id
+                WHERE trip_id = $1 AND c.parent_comment_id IS NULL;
             `;
         const result = await pool.query(query, [tripId]);
         //console.log(result.rows); // Debug
-        if (result.rows.length === 0) {
-            return res.status(404).json({ success: false, error: 'Vylet nebol najdeny' });
-        }
 
         const comments = result.rows.map(row => ({
-            userId: row.user_id,
+            userId: row.username,
+            userPhotoUrl: row.photo_url,
             commentText: row.comment_text,
             createdAt: row.created_at,
         }));
         console.log(comments);
         res.json({ success: true, comments });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ success: false, error: 'Chyba databazy' });
+    }
+});
+
+app.post('/comments/:tripId', authenticateToken, async (req, res) => {
+    console.log("DEBUG\n"); // Debug
+    console.log(req.body); // Debug
+    console.log(req.params); // Debug
+    try {
+        const { tripId } = req.params;
+        const { commentText } = req.body;
+        if (!tripId || isNaN(tripId)) {
+            return res.status(400).json({ success: false, error: 'ID výletu musí byť číslo.' });
+        }
+        if (!commentText) {
+            return res.status(400).json({ success: false, error: 'Text komentara je povinny.' });
+        }
+        const query = `
+            INSERT INTO comments (user_id, trip_id, comment_text, created_at)
+            VALUES ($1, $2, $3, NOW())
+            RETURNING *;
+        `;
+        const result = await pool.query(query, [req.user.id, tripId, commentText]);
+        
+        if (result.rowCount === 0) {
+            return res.status(404).json({ success: false, error: 'Vylet nebol najdeny' });
+        }
+        
+        res.json({ success: true, comment: result.rows[0] });
     } catch (error) {
         console.error(error);
         res.status(500).json({ success: false, error: 'Chyba databazy' });
@@ -252,8 +323,7 @@ app.get('/trips', authenticateToken, async (req, res) => {
             FROM trips t 
             JOIN users u ON t.user_id = u.id
             LEFT JOIN trip_photos tp ON t.id = tp.trip_id
-            GROUP BY t.id, u.username, t.ended_at, t.distance_km, t.duration_seconds, t.average_pace, t.title, t.route_geometry
-            LIMIT 5;
+            GROUP BY t.id, u.username, t.ended_at, t.distance_km, t.duration_seconds, t.average_pace, t.title, t.route_geometry;
         `;
         const result = await pool.query(query);
         if (result.rows.length === 0) {
@@ -330,7 +400,8 @@ app.post('/trips', authenticateToken, async (req, res) => {
 
 app.put('/auth/profile', authenticateToken, upload.single('pfp') ,async (req, res) => {
     try {
-        const { userId, username, email, phoneNumber } = req.body;
+        const {username, email, phoneNumber } = req.body;
+        const userId = req.user.id;
         const photoUrl = req.file ? `/uploads/${req.file.filename}` : null;
         if (!userId) {
             return res.status(400).json({ success: false, error: 'Vyžaduje sa ID používateľa.' });
@@ -376,8 +447,8 @@ app.put('/auth/profile', authenticateToken, upload.single('pfp') ,async (req, re
 
 app.put('/auth/password', authenticateToken, async (req, res) => {
     try {
-        const { userId, currentPassword, newPassword } = req.body;
-
+        const {currentPassword, newPassword } = req.body;
+        const userId = req.user.id;
         if (!userId || !currentPassword || !newPassword) {
             return res.status(400).json({ success: false, error: 'Vyžaduje sa ID používateľa, aktuálne heslo a nové heslo.' });
         }
@@ -554,6 +625,31 @@ app.get('/auth/verify', authenticateToken, (req, res) => {
     } 
   });
 });
+
+app.get('/mytrips', authenticateToken, async (req, res) => {
+    try {
+      const query = 
+        `SELECT t.id, t.title, t.ended_at, t.distance_km, t.duration_seconds, t.average_pace, t.type,
+        ST_AsGeoJSON(t.route_geometry) AS route
+        FROM trips t
+        WHERE t.user_id = $1
+        ORDER BY t.ended_at DESC`
+      ;
+      const result = await pool.query(query, [req.user.id]);
+      const trips = result.rows.map(trip => {
+        trip.route = JSON.parse(trip.route);
+        return trip;
+      });
+      res.json({ success: true, trips });
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ success: false, error: 'Chyba databazy' });
+    }
+});
+
+app.post('/auth/logout', (req, res) => {
+    res.json({ success: true, message: "Logged out" });
+  });  
 
 app.listen(port, () => {
     console.log(`Server running on http://localhost:${port}`);
