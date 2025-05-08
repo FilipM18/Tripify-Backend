@@ -8,6 +8,8 @@ import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import http from 'http';
+import { WebSocketServer } from 'ws';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -15,14 +17,55 @@ const __dirname = path.dirname(__filename);
 dotenv.config();
 const app = express();
 const port = 3000;
+const server = http.createServer(app);
+// Create WebSocket server
+const wss = new WebSocketServer({ server });
 
+// Store connected clients with their user info
+const clients = new Map();
 
 const JWT_SECRET = process.env.JWT_SECRET
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: { rejectUnauthorized: false }
-  });
+});
+
+// WebSocket connection handler
+wss.on('connection', (ws, req) => {
+    console.log('New WebSocket connection');
+    // Extract token from query parameters or headers
+    const url = new URL(req.url, 'http://localhost');
+    const token = url.searchParams.get('token');
+    
+    if (!token) {
+      ws.close(1008, 'Authentication required');
+      return;
+    }
+    
+    // Verify token
+    jwt.verify(token, JWT_SECRET, (err, user) => {
+      if (err) {
+        ws.close(1008, 'Invalid token');
+        return;
+      }
+      
+      // Store user info with the connection
+      ws.userId = user.id;
+      clients.set(user.id, ws);
+      
+      // Send initial connection confirmation
+      ws.send(JSON.stringify({
+        type: 'connection',
+        message: 'Connected to WebSocket server'
+      }));
+      
+      // Handle client disconnect
+      ws.on('close', () => {
+        clients.delete(user.id);
+      });
+    });
+});  
 
 // Middleware
 app.use(express.json());
@@ -67,7 +110,7 @@ const upload = multer({ storage });
 app.post('/auth/register', upload.single('pfp'), async (req, res) => {
     try {
         const { username, email, password, phoneNumber} = req.body;
-        console.log(req.body);
+        //console.log(req.body);
         console.log(req.file); // Debug
         if (!username || !email || !password) {
             return res.status(400).json({ success: false, error: 'Username, email, a heslo su povinne.' });
@@ -156,7 +199,7 @@ app.get('/likes/:type/:id', authenticateToken, async (req, res) => {
         const result = await pool.query(query, [id]);
 
         const likes = result.rows.map(row => row.user_id);
-        console.log(likes);
+        //console.log(likes);
         res.json({ success: true, likes });
     } catch (error) {
         console.error(error);
@@ -179,7 +222,7 @@ app.post('/likes/:type/:id', authenticateToken, async (req, res) => {
             return res.status(400).json({ success: false, error: 'Neplatny typ.' });
         }let query = '';
         const checkResult = await pool.query(checkQuery, [req.user.id, id]);
-        console.log(checkResult.rows); // Debug
+        //console.log(checkResult.rows); // Debug
         if (checkResult.rows.length > 0) {
             let deleteQuery = '';
             if (type === 'trip') {
@@ -201,11 +244,15 @@ app.post('/likes/:type/:id', authenticateToken, async (req, res) => {
             }
         
             
-        }const result = await pool.query(query, [req.user.id, id]);
-        if (result.rowCount === 0) {
-            return res.status(404).json({ success: false, error: 'Vylet nebol najdeny' });
         }
+        const result = await pool.query(query, [req.user.id, id]);
         
+        // Determine if this was a like or unlike action
+        const isLike = checkResult.rows.length === 0;
+        
+        // Broadcast to all connected clients
+        broadcastLikeUpdate(type, id, req.user.id, isLike);
+
         res.json({ success: true, like: result.rows[0] });
     } catch (error) {
         console.error(error);
@@ -213,9 +260,30 @@ app.post('/likes/:type/:id', authenticateToken, async (req, res) => {
     }
 });
 
+// Function to broadcast like updates
+function broadcastLikeUpdate(type, id, userId, isLike) {
+    console.log("broadcastLikeUpdate",type, id, userId, isLike); // Debug
+    const message = JSON.stringify({
+      type: 'like-update',
+      data: {
+        contentType: type,
+        contentId: id,
+        userId: userId,
+        action: isLike ? 'like' : 'unlike'
+      }
+    });
+    
+    // Send to all connected clients
+    wss.clients.forEach(client => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(message);
+      }
+    });
+}
+
 app.get('/comments/:tripId', authenticateToken, async (req, res) => {    
     try {
-        console.log(req.params);
+        //console.log(req.params);
         const { tripId } = req.params;
         if (!tripId || isNaN(tripId)) {
             return res.status(400).json({ success: false, error: 'ID výletu musí byť číslo.' });
@@ -244,9 +312,9 @@ app.get('/comments/:tripId', authenticateToken, async (req, res) => {
 });
 
 app.post('/comments/:tripId', authenticateToken, async (req, res) => {
-    console.log("DEBUG\n"); // Debug
-    console.log(req.body); // Debug
-    console.log(req.params); // Debug
+    //console.log("DEBUG\n"); // Debug
+    //console.log(req.body); // Debug
+    //console.log(req.params); // Debug
     try {
         const { tripId } = req.params;
         const { commentText } = req.body;
@@ -263,10 +331,21 @@ app.post('/comments/:tripId', authenticateToken, async (req, res) => {
         `;
         const result = await pool.query(query, [req.user.id, tripId, commentText]);
         
-        if (result.rowCount === 0) {
-            return res.status(404).json({ success: false, error: 'Vylet nebol najdeny' });
-        }
+        // Get user info for the comment
+        const userQuery = await pool.query('SELECT username, photo_url FROM users WHERE id = $1', [req.user.id]);
+        const user = userQuery.rows[0];
         
+        // Broadcast the new comment
+        broadcastNewComment({
+            tripId,
+            userId: req.user.id,
+            username: user.username,
+            userPhotoUrl: user.photo_url,   
+            commentText,
+            commentId: result.rows[0].id,
+            createdAt: result.rows[0].created_at
+        });
+
         res.json({ success: true, comment: result.rows[0] });
     } catch (error) {
         console.error(error);
@@ -274,15 +353,29 @@ app.post('/comments/:tripId', authenticateToken, async (req, res) => {
     }
 });
 
+function broadcastNewComment(commentData) {
+    console.log("broadcastNewComment",commentData); // Debug
+    const message = JSON.stringify({
+      type: 'new-comment',
+      data: commentData
+    });
+    
+    wss.clients.forEach(client => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(message);
+      }
+    });
+}
+
 app.get('/trips/:tripId', authenticateToken, async (req, res) => {
     try {
-        console.log(req.params); // Debug
+        //console.log(req.params); // Debug
         const { tripId } = req.params;
         if (!tripId || isNaN(tripId)) {
             return res.status(400).json({ success: false, error: 'ID výletu musí byť číslo.' });
         }
         const query = `
-            SELECT t.id, u.username, t.ended_at, t.distance_km, t.duration_seconds, t.average_pace, t.info,
+            SELECT t.id, u.username, t.started_at, t.ended_at, t.distance_km, t.duration_seconds, t.average_pace, t.info,
                 ST_AsGeoJSON(t.route_geometry) AS route,
                 COALESCE(json_agg(tp.photo_url) FILTER (WHERE tp.photo_url IS NOT NULL), '[]') AS photo_urls,
                 (SELECT COUNT(*) FROM likes WHERE trip_id = t.id) AS likes_count,
@@ -304,7 +397,7 @@ app.get('/trips/:tripId', authenticateToken, async (req, res) => {
 
         const trip = result.rows[0];
         trip.route = JSON.parse(trip.route); // GeoJSON string -> object
-        console.log(trip.route); // Debug
+        //console.log(trip.route); // Debug
         res.json({ success: true, trip });
     } catch (error) {
         console.error(error);
@@ -344,7 +437,7 @@ app.get('/trips', authenticateToken, async (req, res) => {
 
 app.get('/dailyTrips/:userId/:day', authenticateToken, async (req, res) => {
     try {
-        console.log(req.params); // Debug
+        //console.log(req.params); // Debug
         const { userId, day } = req.params;
         if (isNaN(Date.parse(day))) {
             return res.status(400).json({ success: false, error: 'Dátum je neplatný.' });
@@ -400,6 +493,8 @@ app.post('/trips', authenticateToken, async (req, res) => {
 
 app.put('/auth/profile', authenticateToken, upload.single('pfp') ,async (req, res) => {
     try {
+        console.log('Request body:', req.body);
+        console.log('File:', req.file);     
         const {username, email, phoneNumber } = req.body;
         const userId = req.user.id;
         const photoUrl = req.file ? `/uploads/${req.file.filename}` : null;
@@ -466,7 +561,7 @@ app.put('/auth/password', authenticateToken, async (req, res) => {
         const user = userQuery.rows[0];
 
         const validPassword = await bcrypt.compare(currentPassword, user.password);
-        console.log(currentPassword, user.password, validPassword); // Debug
+        //console.log(currentPassword, user.password, validPassword); // Debug
         if (!validPassword) {
             return res.status(401).json({ success: false, error: 'Aktuálne heslo je nesprávne.' });
         }
@@ -651,6 +746,6 @@ app.post('/auth/logout', (req, res) => {
     res.json({ success: true, message: "Logged out" });
   });  
 
-app.listen(port, () => {
+  server.listen(port, () => {
     console.log(`Server running on http://localhost:${port}`);
 });

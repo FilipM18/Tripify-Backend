@@ -16,10 +16,12 @@
     "body-parser": "^1.20.3",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "http": "^0.0.1-security",
     "jsonwebtoken": "^9.0.2",
     "multer": "^1.4.5-lts.2",
     "pg": "^8.14.1",
     "pkg": "^5.8.1",
-    "supabase": "^2.20.5"
+    "supabase": "^2.20.5",
+    "ws": "^8.18.2"
   }
 }
