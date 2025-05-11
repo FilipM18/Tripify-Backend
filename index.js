@@ -9,7 +9,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import http from 'http';
-import { WebSocketServer } from 'ws';
+import { WebSocketServer, WebSocket } from 'ws';
+import admin from 'firebase-admin';
+import serviceAccount from './mtaa-nots-firebase-adminsdk-fbsvc-07aca4adf7.json' with { type: 'json' };
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,11 +20,14 @@ dotenv.config();
 const app = express();
 const port = 3000;
 const server = http.createServer(app);
-// Create WebSocket server
+
 const wss = new WebSocketServer({ server });
 
 // Store connected clients with their user info
 const clients = new Map();
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+});
 
 const JWT_SECRET = process.env.JWT_SECRET
 
@@ -31,10 +36,9 @@ const pool = new Pool({
     ssl: { rejectUnauthorized: false }
 });
 
-// WebSocket connection handler
 wss.on('connection', (ws, req) => {
     console.log('New WebSocket connection');
-    // Extract token from query parameters or headers
+
     const url = new URL(req.url, 'http://localhost');
     const token = url.searchParams.get('token');
     
@@ -50,17 +54,14 @@ wss.on('connection', (ws, req) => {
         return;
       }
       
-      // Store user info with the connection
       ws.userId = user.id;
       clients.set(user.id, ws);
       
-      // Send initial connection confirmation
       ws.send(JSON.stringify({
         type: 'connection',
         message: 'Connected to WebSocket server'
       }));
       
-      // Handle client disconnect
       ws.on('close', () => {
         clients.delete(user.id);
       });
@@ -106,6 +107,27 @@ const storage = multer.diskStorage({
     },
 });
 const upload = multer({ storage });
+
+async function sendPushNotification(tokens, notification) {
+  try {
+    const message = {
+      notification: {
+        title: notification.title,
+        body: notification.body
+      },
+      data: notification.data,
+      tokens: tokens
+    };
+    
+    const response = await admin.messaging().sendEachForMulticast(message)
+    console.log(`${response.successCount} messages were sent successfully`);
+    return response;
+  } catch (error) {
+    console.error('Error sending push notification:', error);
+    throw error;
+  }
+}
+
 
 app.post('/auth/register', upload.single('pfp'), async (req, res) => {
     try {
@@ -208,59 +230,88 @@ app.get('/likes/:type/:id', authenticateToken, async (req, res) => {
 });
 
 app.post('/likes/:type/:id', authenticateToken, async (req, res) => {
-    try {
-        const { type, id } = req.params;
-        if (isNaN(id)) {
-            return res.status(400).json({ success: false, error: 'ID musí byť číslo.' });
-        }
-        let checkQuery = '';
-        if (type === 'trip') {
-            checkQuery = 'SELECT * FROM likes WHERE user_id = $1 AND trip_id = $2';
-        } else if (type === 'comment') {
-            checkQuery = 'SELECT * FROM likes WHERE user_id = $1 AND comment_id = $2';
-        } else {
-            return res.status(400).json({ success: false, error: 'Neplatny typ.' });
-        }let query = '';
-        const checkResult = await pool.query(checkQuery, [req.user.id, id]);
-        //console.log(checkResult.rows); // Debug
-        if (checkResult.rows.length > 0) {
-            let deleteQuery = '';
-            if (type === 'trip') {
-                deleteQuery = 'DELETE FROM likes WHERE user_id = $1 AND trip_id = $2 RETURNING *';
-            } else if (type === 'comment') {
-                deleteQuery = 'DELETE FROM likes WHERE user_id = $1 AND comment_id = $2 RETURNING *';
-            }
-            const deleteResult = await pool.query(deleteQuery, [req.user.id, id]);
-            console.log("vymazaný like",deleteResult.rows); // Debug
-        }
-        else {
-            
-            if (type === 'trip') {
-                query = 'INSERT INTO likes (user_id, trip_id) VALUES ($1, $2) RETURNING *';
-            } else if (type === 'comment') {
-                query = 'INSERT INTO likes (user_id, comment_id) VALUES ($1, $2) RETURNING *';
-            } else {
-                return res.status(400).json({ success: false, error: 'Neplatny typ.' });
-            }
-        
-            
-        }
-        const result = await pool.query(query, [req.user.id, id]);
-        
-        // Determine if this was a like or unlike action
-        const isLike = checkResult.rows.length === 0;
-        
-        // Broadcast to all connected clients
-        broadcastLikeUpdate(type, id, req.user.id, isLike);
-
-        res.json({ success: true, like: result.rows[0] });
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ success: false, error: 'Chyba databazy' });
+  try {
+    const { type, id } = req.params;
+    if (isNaN(id)) {
+      return res.status(400).json({ success: false, error: 'ID musí byť číslo.' });
     }
+    
+    let checkQuery = '';
+    if (type === 'trip') {
+      checkQuery = 'SELECT * FROM likes WHERE user_id = $1 AND trip_id = $2';
+    } else if (type === 'comment') {
+      checkQuery = 'SELECT * FROM likes WHERE user_id = $1 AND comment_id = $2';
+    } else {
+      return res.status(400).json({ success: false, error: 'Neplatny typ.' });
+    }
+    
+    const checkResult = await pool.query(checkQuery, [req.user.id, id]);
+    let query = '';
+    
+    // unlike
+    if (checkResult.rows.length > 0) {
+      let deleteQuery = '';
+      if (type === 'trip') {
+        deleteQuery = 'DELETE FROM likes WHERE user_id = $1 AND trip_id = $2 RETURNING *';
+      } else if (type === 'comment') {
+        deleteQuery = 'DELETE FROM likes WHERE user_id = $1 AND comment_id = $2 RETURNING *';
+      }
+      const deleteResult = await pool.query(deleteQuery, [req.user.id, id]);
+    } 
+    // like
+    else {
+      if (type === 'trip') {
+        query = 'INSERT INTO likes (user_id, trip_id) VALUES ($1, $2) RETURNING *';
+      } else if (type === 'comment') {
+        query = 'INSERT INTO likes (user_id, comment_id) VALUES ($1, $2) RETURNING *';
+      }
+    }
+    
+    const result = await pool.query(query, [req.user.id, id]);
+    const isLike = checkResult.rows.length === 0;
+    
+    broadcastLikeUpdate(type, id, req.user.id, isLike);
+
+    let ownerId;
+    if (type === 'trip') {
+      const tripQuery = await pool.query('SELECT user_id FROM trips WHERE id = $1', [id]);
+      if (tripQuery.rows.length > 0) {
+        ownerId = tripQuery.rows[0].user_id;
+      }
+    } else if (type === 'comment') {
+      const commentQuery = await pool.query('SELECT user_id FROM comments WHERE id = $1', [id]);
+      if (commentQuery.rows.length > 0) {
+        ownerId = commentQuery.rows[0].user_id;
+      }
+    }
+    
+
+    if (ownerId && ownerId !== req.user.id && isLike) {
+
+      const deviceQuery = await pool.query('SELECT device_token FROM user_devices WHERE user_id = $1', [ownerId]);
+      const deviceTokens = deviceQuery.rows.map(row => row.device_token).filter(Boolean);
+      
+      if (deviceTokens.length > 0) {
+        await sendPushNotification(deviceTokens, {
+          title: 'New Like',
+          body: `${req.user.username} liked your ${type}`,
+          data: {
+            type: 'like',
+            contentType: type,
+            contentId: id.toString()
+          }
+        });
+      }
+    }
+
+    res.json({ success: true, like: result.rows[0] });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, error: 'Chyba databazy' });
+  }
 });
 
-// Function to broadcast like updates
+
 function broadcastLikeUpdate(type, id, userId, isLike) {
     console.log("broadcastLikeUpdate",type, id, userId, isLike); // Debug
     const message = JSON.stringify({
@@ -273,11 +324,10 @@ function broadcastLikeUpdate(type, id, userId, isLike) {
       }
     });
     
-    // Send to all connected clients
     wss.clients.forEach(client => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(message);
-      }
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(message);
+        }
     });
 }
 
@@ -331,11 +381,9 @@ app.post('/comments/:tripId', authenticateToken, async (req, res) => {
         `;
         const result = await pool.query(query, [req.user.id, tripId, commentText]);
         
-        // Get user info for the comment
         const userQuery = await pool.query('SELECT username, photo_url FROM users WHERE id = $1', [req.user.id]);
         const user = userQuery.rows[0];
-        
-        // Broadcast the new comment
+
         broadcastNewComment({
             tripId,
             userId: req.user.id,
@@ -345,6 +393,27 @@ app.post('/comments/:tripId', authenticateToken, async (req, res) => {
             commentId: result.rows[0].id,
             createdAt: result.rows[0].created_at
         });
+
+        const tripQuery = await pool.query('SELECT user_id FROM trips WHERE id = $1', [tripId]);
+        if (tripQuery.rows.length > 0) {
+        const ownerId = tripQuery.rows[0].user_id;
+        
+        if (ownerId !== req.user.id) {
+            const deviceQuery = await pool.query('SELECT device_token FROM user_devices WHERE user_id = $1', [ownerId]);
+            const deviceTokens = deviceQuery.rows.map(row => row.device_token);
+            
+            if (deviceTokens.length > 0) {
+            sendPushNotification(deviceTokens, {
+                title: 'New Comment',
+                body: `${req.user.username} commented on your trip`,
+                data: {
+                type: 'comment',
+                tripId: tripId
+                }
+            });
+            }
+        }
+        }
 
         res.json({ success: true, comment: result.rows[0] });
     } catch (error) {
@@ -484,6 +553,37 @@ app.post('/trips', authenticateToken, async (req, res) => {
             return res.status(400).json({ success: false, error: 'Chyba pri spracovaní trasy' });
         }
         const result = await pool.query(query, [userId, startedAt, endedAt, distanceKm, durationSeconds, averagePace, lineString, title, info, type]);
+        
+        const message = JSON.stringify({
+        type: 'new-trip',
+        data: {
+            tripId: result.rows[0].id,
+            username: req.user.username,
+            title: title || 'New Trip'
+        }
+        });
+        
+        wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(message);
+        }
+        });
+        
+        // Send push notification to all users except the creator
+        const userQuery = await pool.query('SELECT device_token FROM user_devices WHERE user_id != $1', [req.user.id]);
+        const deviceTokens = userQuery.rows.map(row => row.device_token);
+        
+        if (deviceTokens.length > 0) {
+        sendPushNotification(deviceTokens, {
+            title: 'New Trip Added',
+            body: `${req.user.username} added a new trip: ${title || 'New Trip'}`,
+            data: {
+            type: 'new-trip',
+            tripId: result.rows[0].id
+            }
+        });
+        }
+        
         res.json({ success: true, tripId: result.rows[0].id });
     } catch (error) {
         console.error(error);
@@ -746,6 +846,36 @@ app.post('/auth/logout', (req, res) => {
     res.json({ success: true, message: "Logged out" });
   });  
 
-  server.listen(port, () => {
+app.post('/register-device', authenticateToken, async (req, res) => {
+  try {
+    const { fcmToken, deviceType = 'android' } = req.body;
+    
+    if (!fcmToken) {
+      return res.status(400).json({ success: false, error: 'FCM token is required' });
+    }
+    
+    // Check if the device is already registered
+    const checkQuery = await pool.query(
+      'SELECT * FROM user_devices WHERE user_id = $1 AND device_token = $2',
+      [req.user.id, fcmToken]
+    );
+    
+    if (checkQuery.rows.length === 0) {
+      // Insert new device token
+      await pool.query(
+        'INSERT INTO user_devices (user_id, device_token, device_type) VALUES ($1, $2, $3)',
+        [req.user.id, fcmToken, deviceType]
+      );
+    }
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, error: 'Database error' });
+  }
+});
+
+
+server.listen(port, () => {
     console.log(`Server running on http://localhost:${port}`);
 });

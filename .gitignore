@@ -2,7 +2,7 @@
 
 # dependencies
 node_modules/
-
+mtaa*.json
 # Expo
 .expo/
 dist/
